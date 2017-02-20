@@ -11,6 +11,7 @@ problem of inferring a spectral time series against photometry.
 """
 
 import sys
+import cPickle as pickle
 import numpy as np
 from scipy import linalg, interpolate, integrate, optimize
 
@@ -69,7 +70,7 @@ class BQFilter(object):
         self.kuu = lambda u1, u2: kcov(self._u2x(u1), self._u2x(u2), *(self.khyp))
         # Internal state
         self.u = np.array([ ])      # quadrature points
-        self.z = np.array([ ])      # quadrature weights
+        self.zu = np.array([ ])     # quadrature weights
         self.K = np.array([[ ]])    # covariance at quadrature points
         # Starting variance
         self._calc_base_variance_integral()
@@ -105,23 +106,20 @@ class BQFilter(object):
             _zn = lambda u: integrate.quad(integ_u, self._ulo, self._uhi)[0]
             # Update internal state
             self.u[-1] = u_n
-            self.z[-1] = _zn(u_n)
+            self.zu[-1] = _zn(u_n)
             kuu_n = self.kuu(self.u, u_n)
             self.K[-1,:] = self.K[:,-1] = kuu_n
             # Calculate and return variance = V0 - z.T * inv(K) * z
             Kchol = linalg.cholesky(self.K, lower=True)
-            zeta = linalg.solve_triangular(Kchol, self.z, lower=True)
+            zeta = linalg.solve_triangular(Kchol, self.zu, lower=True)
             self.Vn = self.V0 - np.dot(zeta, zeta)
             return self.Vn
         # Enlarge internal state and optimize over location of new point
         # Since doing this in u, initial guess for new point is 0.0
         n = len(self.u)
-        self._vmsg("add_one_point:  n = {}, u = {}".format(n, self.u))
         KX = np.atleast_2d([self.u])
         self.u = np.concatenate([self.u, [0.0]])
-        self.z = np.concatenate([self.z, [0.0]])
-        print "K.shape =", self.K.shape
-        print "KX.shape =", KX.shape
+        self.zu = np.concatenate([self.zu, [0.0]])
         if self.K.shape[1] == 0:
             self.K = np.array([[1.0]])
         else:
@@ -132,10 +130,15 @@ class BQFilter(object):
                                    bounds=np.array([(self._ulo, self._uhi)]))
         if result.success:
             self._vmsg("add_one_point:  Added new point (wt) {} ({}); Vn = {}"
-                       .format(self.u[-1], self.z[-1], self.Vn))
+                       .format(self.u[-1], self.zu[-1], self.Vn))
         else:
             self._vmsg("add_one_point:  Optimization failed, don't trust me!")
             self._vmsg("Failure message:  {}".format(result.message))
+        # Return quadrature points and weights for integration transformed
+        # back to original x-axis, along with the renormalized variance.
+        self.x = self._u2x(self.u)
+        self.zx = self.z * self._xsig * self.Zu
+        self.Vxn = self.Vn * (self._xsig * self.Zu)**2
 
     def add_n_points(self, n=0):
         """
@@ -144,15 +147,6 @@ class BQFilter(object):
         for i in range(n):
             self.add_one_point()
 
-    def denorm_uzv(self):
-        """
-        Return quadrature points and weights for integration transformed back
-        to original x-axis, along with the renormalized variance.
-        """
-        x = self._u2x(self.u)
-        zx = self.z * self._xsig * self.Zu
-        Vxn = self.Vn * (self._xsig * self.Zu)**2
-        return x, zx, Vxn
 
 def sqexp(x1, x2, l):
     """
