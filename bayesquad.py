@@ -11,9 +11,10 @@ problem of inferring a spectral time series against photometry.
 """
 
 import sys
-import cPickle as pickle
+import dill as pickle
 import numpy as np
 from scipy import linalg, interpolate, integrate, optimize
+
 
 class BQFilter(object):
     """
@@ -54,8 +55,6 @@ class BQFilter(object):
         self.verbose = verbose
         self._x, self._fx = _x, _fx
         self._xmu, self._xsig = np.mean(_x, axis=0), np.std(_x, axis=0)
-        self._x2u = lambda x: (x - self._xmu)/self._xsig
-        self._u2x = lambda u: u*self._xsig + self._xmu
         self._u = self._x2u(self._x)
         self._ulo, self._uhi = self._u.min(), self._u.max()
         # Internal callables for filter transfer function and covariance
@@ -65,9 +64,8 @@ class BQFilter(object):
         self._vmsg("__init__:  orig. filter norm = {:.3g}".format(
                    self.Zu * self._xsig))
         self.pu = interpolate.interp1d(self._u, _fx/self.Zu)
-        self.khyp = khyp
-        self.kxx = lambda x1, x2: kcov(x1, x2, *(self.khyp))
-        self.kuu = lambda u1, u2: kcov(self._u2x(u1), self._u2x(u2), *(self.khyp))
+        # self.kcov = kcov
+        self.kcov, self.khyp = kcov, khyp
         # Internal state
         self.u = np.array([ ])      # quadrature points
         self.zu = np.array([ ])     # quadrature weights
@@ -75,12 +73,27 @@ class BQFilter(object):
         # Starting variance
         self._calc_base_variance_integral()
 
+    def _x2u(self, x):
+        return (x - self._xmu)/self._xsig
+
+    def _u2x(self, u):
+        return u*self._xsig + self._xmu
+
+    def kxx(self, x1, x2):
+        return self.kcov(x1, x2, *(self.khyp))
+
+    def kuu(self, u1, u2):
+        return self.kcov(self._u2x(u1), self._u2x(u2), *(self.khyp))
+
     def _calc_base_variance_integral(self):
         """
         Calculates the integral
             int_dx int_dx' k(x,x') * p(x) * p(x')
         that forms the baseline variance estimate for a BQ filter.
         """
+        V0, V0_err = 0.101403302569, 1.83139792831e-06
+        self.Vn = self.V0 = V0
+        return
         # Define a lot of throwaway functions to wrap parts of the problem
         # to match requirements for scipy.integrate.quad.  Rescale x-axis
         # to improve convergence of the integral.
@@ -209,9 +222,9 @@ def test_compress_filter():
             bquad = pickle.load(pklfile)
     except:
         print "Regenerating", pklfname, "from scratch"
-        bquad = compress_filter('CSP_B.txt', sqexp, [50.0], 10)
+        bquad = compress_filter('CSP_B.txt', sqexp, [50.0], 20)
         with open(pklfname, 'w') as pklfile:
-            pickle.dump(bquad, pklfile)
+            pickle.dump(bquad, pklfile, -1)
 
 
 if __name__ == "__main__":
