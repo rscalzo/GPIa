@@ -110,6 +110,7 @@ class BQFilter(object):
         """
         Runs optimization for adding a single point to the BQ filter.
         """
+        Ktmp = np.array(self.K)
         def u_var(u_n):
             # Wrapper functions for integrands
             integ_u = lambda u: self.kuu(u, u_n) * self.pu(u)
@@ -118,9 +119,9 @@ class BQFilter(object):
             self.u[-1] = u_n
             self.zu[-1] = _zn(u_n)
             kuu_n = self.kuu(self.u, u_n)
-            self.K[-1,:] = self.K[:,-1] = kuu_n
+            Ktmp[-1,:] = Ktmp[:,-1] = kuu_n
             # Calculate and return variance = V0 - z.T * inv(K) * z
-            self.Kchol = linalg.cholesky(self.K, lower=True)
+            self.Kchol = linalg.cholesky(Ktmp, lower=True)
             zeta = linalg.solve_triangular(self.Kchol, self.zu, lower=True)
             self.Vn = self.V0 - np.dot(zeta, zeta)
             return self.Vn
@@ -130,17 +131,36 @@ class BQFilter(object):
         KX = np.atleast_2d([self.u])
         self.u = np.concatenate([self.u, [0.0]])
         self.zu = np.concatenate([self.zu, [0.0]])
-        if self.K.shape[1] == 0:
-            self.K = np.array([[1.0]])
+        if Ktmp.shape[1] == 0:
+            Ktmp = np.array([[1.0]])
         else:
-            self.K = np.vstack([np.hstack([self.K, KX.T   ]),
-                                np.hstack([KX,     [[1.0]]])])
+            Ktmp = np.vstack([np.hstack([self.K, KX.T   ]),
+                              np.hstack([KX,     [[1.0]]])])
+        # As we add more points the Cholesky factor may become more unstable,
+        # so add a small nugget -- as small as we can get away with.
+        nugget = 1e-16
         self._vmsg("add_one_point:  Optimizing over point #{}...".format(n+1))
-        result = optimize.minimize(u_var, np.array([0.0]),
-                                   bounds=np.array([(self._ulo, self._uhi)]))
-        if result.success:
+        while nugget <= 0.1:
+            try:
+                u0 = np.array([0.0])
+                bounds = np.array([(self._ulo, self._uhi)])
+                result = optimize.minimize(u_var, u0, bounds=bounds)
+                break
+            except Exception as e:
+                self._vmsg("add_one_point:  Cholesky factorization failed")
+                self._vmsg(str(e))
+                self._vmsg("add_one_point:  adding nugget = {} "
+                           "to stabilize Cholesky factor".format(nugget))
+                Ktmp += nugget * np.eye(n+1)
+                nugget *= 10
+        if nugget > 0.1:
+            self._vmsg("add_one_point:  total Cholesky factorization fail")
+            self.u, self.zu = self.u[:-1], self.zu[:-1]
+            return
+        elif result.success:
             self._vmsg("add_one_point:  Added new point (wt) {} ({}); Vn = {}"
                        .format(self.u[-1], self.zu[-1], self.Vn))
+            self.K = Ktmp
         else:
             self._vmsg("add_one_point:  Optimization failed, don't trust me!")
             self._vmsg("Failure message:  {}".format(result.message))
