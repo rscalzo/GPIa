@@ -91,9 +91,6 @@ class BQFilter(object):
             int_dx int_dx' k(x,x') * p(x) * p(x')
         that forms the baseline variance estimate for a BQ filter.
         """
-        V0, V0_err = 0.101403302569, 1.83139792831e-06
-        self.Vn = self.V0 = V0
-        return
         # Define a lot of throwaway functions to wrap parts of the problem
         # to match requirements for scipy.integrate.quad.  Rescale x-axis
         # to improve convergence of the integral.
