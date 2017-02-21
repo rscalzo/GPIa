@@ -94,7 +94,7 @@ class BQFilter(object):
         self._vmsg("_calc_base_variance_integral: V0 = {} +/- {}"
                    .format(V0, V0_err))
         self._vmsg("_calc_base_variance_integral: V0[xval] = {}"
-                   .format(V0 * (self._xsig * self.Zu)**2)
+                   .format(V0 * (self._xsig * self.Zu)**2))
 
     def add_one_point(self):
         """
@@ -110,8 +110,8 @@ class BQFilter(object):
             kuu_n = self.kuu(self.u, u_n)
             self.K[-1,:] = self.K[:,-1] = kuu_n
             # Calculate and return variance = V0 - z.T * inv(K) * z
-            Kchol = linalg.cholesky(self.K, lower=True)
-            zeta = linalg.solve_triangular(Kchol, self.zu, lower=True)
+            self.Kchol = linalg.cholesky(self.K, lower=True)
+            zeta = linalg.solve_triangular(self.Kchol, self.zu, lower=True)
             self.Vn = self.V0 - np.dot(zeta, zeta)
             return self.Vn
         # Enlarge internal state and optimize over location of new point
@@ -134,10 +134,11 @@ class BQFilter(object):
         else:
             self._vmsg("add_one_point:  Optimization failed, don't trust me!")
             self._vmsg("Failure message:  {}".format(result.message))
+        self.wbq = linalg.cho_solve((self.Kchol, True), self.zu)
         # Return quadrature points and weights for integration transformed
         # back to original x-axis, along with the renormalized variance.
         self.x = self._u2x(self.u)
-        self.zx = self.z * self._xsig * self.Zu
+        self.zx = self.zu * self._xsig * self.Zu
         self.Vxn = self.Vn * (self._xsig * self.Zu)**2
 
     def add_n_points(self, n=0):
@@ -147,6 +148,34 @@ class BQFilter(object):
         for i in range(n):
             self.add_one_point()
 
+    def int_quadz(self, f):
+        """
+        Uses straight-up quadrature to evaluate integral of f.  In most
+        interesting cases f will be an interpolate.interp1d over some
+        set of points (for example, an observed supernova spectrum).
+        Parameters:
+            f: 1-D callable
+        """
+        integ_u = lambda u: f(self._u2x(u)) * self.pu(u)
+        pnorm = self._xsig * self.Zu
+        Fu, Fu_err = lambda u: integrate.quad(integ_u, self._ulo, self._uhi)
+        Fx, Fx_err = Fu * pnorm, Fu_err * pnorm
+        self._vmsg('int_quadz: F = {} +/- {}'.format(Fx, Fx_err))
+        return Fx
+
+    def int_bayes(self, f):
+        """
+        Uses Bayesian quadrature rule to evaluate integral of f.  The rule
+        is derived assuming f is a Gaussian process with a given covariance
+        kernel (i.e. fixed hyperparameters).
+        Parameters:
+            f: 1-D callable
+        """
+        pnorm = self._xsig * self.Zu
+        Fx = np.dot(self.wbq, f(self._x)) * self.pnorm
+        self._vmsg('int_quadz: F = {}'.format(Fx))
+        return Fx
+
 
 def sqexp(x1, x2, l):
     """
@@ -154,16 +183,36 @@ def sqexp(x1, x2, l):
     """
     return np.exp(-0.5*((x1-x2)/l)**2)
 
-def compress_filter(fname, kcov, khyp):
+def compress_filter(fname, kcov, khyp, n_points):
     """
     Reads in a transfer curve for a filter, and computes an optimal
     Bayesian quadrature rule for a square exponential covariance kernel.
     Parameters:
         fname:  name of two-column text file with (x, y) pairs
+        kcov:   covariance kernel for GP integrand (callable),
+                defined to take two arguments x1, x2
+        khyp:  (fixed) hyperparameters for kcov (np.array of floats)
+        n_points:  number of quadrature points desired
     """
     _x, _fx = np.loadtxt(fname, unpack=True)
     bquad = BQFilter(_x, _fx, kcov, khyp, verbose=True)
-    bquad.add_n_points(10)
+    bquad.add_n_points(n_points)
+    return bquad
+
+def test_compress_filter():
+    """
+    Tests against a given dataset
+    """
+    pklfname = "bquad_test.pkl"
+    try:
+        with open(pklfname) as pklfile:
+            bquad = pickle.load(pklfile)
+    except:
+        print "Regenerating", pklfname, "from scratch"
+        bquad = compress_filter('CSP_B.txt', sqexp, [50.0], 10)
+        with open(pklfname, 'w') as pklfile:
+            pickle.dump(bquad, pklfile)
+
 
 if __name__ == "__main__":
-    compress_filter('CSP_B.txt', sqexp, [50.0])
+    test_compress_filter()
