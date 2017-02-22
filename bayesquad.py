@@ -11,6 +11,7 @@ problem of inferring a spectral time series against photometry.
 """
 
 import sys
+import glob
 import dill as pickle
 import numpy as np
 from scipy import linalg, interpolate, integrate, optimize
@@ -91,6 +92,10 @@ class BQFilter(object):
             int_dx int_dx' k(x,x') * p(x) * p(x')
         that forms the baseline variance estimate for a BQ filter.
         """
+        if False:
+            V0, V0_err = 0.101403302569, 1.83139792831e-06
+            self.Vn = self.V0 = V0
+            return
         # Define a lot of throwaway functions to wrap parts of the problem
         # to match requirements for scipy.integrate.quad.  Rescale x-axis
         # to improve convergence of the integral.
@@ -136,17 +141,21 @@ class BQFilter(object):
         else:
             Ktmp = np.vstack([np.hstack([self.K, KX.T   ]),
                               np.hstack([KX,     [[1.0]]])])
+        Ktmp += 1e-8 * np.eye(n+1)
         # As we add more points the Cholesky factor may become more unstable,
         # so add a small nugget -- as small as we can get away with.
-        nugget = 1e-16
+        nugget = 1e-07
         self._vmsg("add_one_point:  Optimizing over point #{}...".format(n+1))
         while nugget <= 0.1:
-            try:
+            # try:
                 u0 = np.array([0.0])
                 bounds = np.array([(self._ulo, self._uhi)])
-                result = optimize.minimize(u_var, u0, bounds=bounds)
+                cons = [{ 'type': 'ineq', 'fun': lambda u: u - self._ulo },
+                        { 'type': 'ineq', 'fun': lambda u: self._uhi - u }]
+                result = optimize.minimize(
+                        u_var, u0, method='COBYLA', constraints=cons)
                 break
-            except Exception as e:
+            # except Exception as e:
                 self._vmsg("add_one_point:  Cholesky factorization failed")
                 self._vmsg(str(e))
                 self._vmsg("add_one_point:  adding nugget = {} "
@@ -188,7 +197,7 @@ class BQFilter(object):
         """
         integ_u = lambda u: f(self._u2x(u)) * self.pu(u)
         pnorm = self._xsig * self.Zu
-        Fu, Fu_err = lambda u: integrate.quad(integ_u, self._ulo, self._uhi)
+        Fu, Fu_err = integrate.quad(integ_u, self._ulo, self._uhi)
         Fx, Fx_err = Fu * pnorm, Fu_err * pnorm
         self._vmsg('int_quadz: F = {} +/- {}'.format(Fx, Fx_err))
         return Fx
@@ -202,16 +211,21 @@ class BQFilter(object):
             f: 1-D callable
         """
         pnorm = self._xsig * self.Zu
-        Fx = np.dot(self.wbq, f(self._x)) * self.pnorm
-        self._vmsg('int_quadz: F = {}'.format(Fx))
+        Fx = np.dot(self.wbq, f(self.x)) * pnorm
+        self._vmsg('int_bayes: F = {}'.format(Fx))
         return Fx
-
 
 def sqexp(x1, x2, l):
     """
     Kernel for the GP, in this case an isotropic square exponential
     """
     return np.exp(-0.5*((x1-x2)/l)**2)
+
+def sqlogexp(x1, x2, logl):
+    """
+    GP kernel, square exponential in log of variable
+    """
+    return np.exp(-0.5*((np.log(x1)-np.log(x2))/logl)**2)
 
 def compress_filter(fname, kcov, khyp, n_points):
     """
@@ -229,19 +243,42 @@ def compress_filter(fname, kcov, khyp, n_points):
     bquad.add_n_points(n_points)
     return bquad
 
+def integrate_test_suite(bquad):
+    """
+    Uses Bayesian quadrature to integrate a bunch of spectra, and compares
+    with results from integrating straight against filter.
+    """
+    fquadz, fbayes = [ ], [ ]
+    for fn in glob.glob("testdata/spec*.txt"):
+        _x, _fx = np.loadtxt(fn, unpack=True)
+        f = interpolate.interp1d(_x, _fx)
+        print "Integrating", fn
+        try:
+            fquadz.append(bquad.int_quadz(f))
+            fbayes.append(bquad.int_bayes(f))
+        except Exception as e:
+            print "...failed:", e
+    delta_f = np.array(fbayes)/np.array(fquadz)
+    print "bayes/quadz ratio over test data = {:.3f} +/- {:.3f}".format(
+            np.mean(delta_f, axis=0), np.std(delta_f, axis=0))
+
 def test_compress_filter():
     """
     Tests against a given dataset
     """
     pklfname = "bquad_test.pkl"
     try:
+        raise Exception
         with open(pklfname) as pklfile:
             bquad = pickle.load(pklfile)
     except:
         print "Regenerating", pklfname, "from scratch"
-        bquad = compress_filter('CSP_B.txt', sqexp, [50.0], 20)
+        filtfname = "CSP_filter_curves/CSP_B.txt"
+        # bquad = compress_filter('CSP_B.txt', sqexp, [50.0], 25)
+        bquad = compress_filter(filtfname, sqlogexp, [0.01], 25)
         with open(pklfname, 'w') as pklfile:
             pickle.dump(bquad, pklfile, -1)
+    integrate_test_suite(bquad)
 
 
 if __name__ == "__main__":
