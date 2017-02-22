@@ -266,19 +266,15 @@ def test_compress_filter():
     """
     Tests against a given dataset
     """
-    pklfname = "bquad_test.pkl"
-    try:
-        raise Exception
-        with open(pklfname) as pklfile:
-            bquad = pickle.load(pklfile)
-    except:
-        print "Regenerating", pklfname, "from scratch"
-        filtfname = "CSP_filter_curves/CSP_B.txt"
-        # bquad = compress_filter('CSP_B.txt', sqexp, [50.0], 25)
-        bquad = compress_filter(filtfname, sqlogexp, [0.01], 25)
+    for filt in ['u', 'B', 'V_9844', 'g', 'r', 'i']:
+        filtfname = "CSP_filter_curves/CSP_{}.txt".format(filt)
+        pklfname = filtfname.replace('.txt', '_bquad.pkl')
+        print "*** Compressing: {} ***".format(filtfname)
+        bquad = compress_filter(filtfname, sqlogexp, [0.01], 30)
+        print "Writing to", pklfname
         with open(pklfname, 'w') as pklfile:
             pickle.dump(bquad, pklfile, -1)
-    integrate_test_suite(bquad)
+        integrate_test_suite(bquad)
 
 
 if __name__ == "__main__":
