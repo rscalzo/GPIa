@@ -16,6 +16,12 @@ import dill as pickle
 import numpy as np
 from scipy import linalg, interpolate, integrate, optimize
 
+def gconst(const):
+    """
+    Generates function that returns the specified constant.
+    (Used in scipy.integrate.dblquad for integration bounds.)
+    """
+    return lambda x: const
 
 class BQFilter(object):
     """
@@ -29,7 +35,11 @@ class BQFilter(object):
             F. Huszar & D. Duvenaud, Proc. UAI 2012, p. 377.
     """
     # In general, underscores represent internal variables associated
-    # with the training points.
+    # with the training points.  One annoying design problem with this
+    # class is the need for internal lambda functions:  the quadrature
+    # schemes in scipy.integrate require a strict function prototype,
+    # but the integrands generally require knowledge of internal state
+    # apart from the function arguments.  I don't 
 
     def _vmsg(self, msg):
         """
@@ -65,7 +75,6 @@ class BQFilter(object):
         self._vmsg("__init__:  orig. filter norm = {:.3g}".format(
                    self.Zu * self._xsig))
         self.pu = interpolate.interp1d(self._u, _fx/self.Zu)
-        # self.kcov = kcov
         self.kcov, self.khyp = kcov, khyp
         # Internal state
         self.u = np.array([ ])      # quadrature points
@@ -80,149 +89,164 @@ class BQFilter(object):
     def _u2x(self, u):
         return u*self._xsig + self._xmu
 
-    def kxx(self, x1, x2):
-        return self.kcov(x1, x2, *(self.khyp))
-
-    def kuu(self, u1, u2):
+    def _kuu(self, u1, u2):
         return self.kcov(self._u2x(u1), self._u2x(u2), *(self.khyp))
+
+    def _kuup(self, u1, u2):
+        return self._kuu(u1, u2) * self.pu(u1)
+
+    def _kuupp(self, u1, u2):
+        return self._kuu(u1, u2) * self.pu(u1) * self.pu(u2)
 
     def _calc_base_variance_integral(self):
         """
         Calculates the integral
-            int_dx int_dx' k(x,x') * p(x) * p(x')
+            V0 = int_dx int_dx' k(x,x') * p(x) * p(x')
         that forms the baseline variance estimate for a BQ filter.
         """
-        if False:
-            V0, V0_err = 0.101403302569, 1.83139792831e-06
-            self.Vn = self.V0 = V0
-            return
-        # Define a lot of throwaway functions to wrap parts of the problem
-        # to match requirements for scipy.integrate.quad.  Rescale x-axis
-        # to improve convergence of the integral.
-        g = lambda const: (lambda x: const)
-        integ_u = lambda u1, u2: self.kuu(u1, u2) * self.pu(u1) * self.pu(u2)
+        self.V0 = 0.154145394591
+        return
         # Run dblquad -- this should take about 1 min to complete
         self._vmsg("_calc_base_variance_integral:  Calculating...")
-        V0, V0_err = integrate.dblquad(
-                integ_u, self._ulo, self._uhi, g(self._ulo), g(self._uhi))
+        V0, V0_err = integrate.dblquad(self._kuupp, self._ulo, self._uhi,
+                                       gconst(self._ulo), gconst(self._uhi))
         self.Vn = self.V0 = V0
         self._vmsg("_calc_base_variance_integral: V0 = {} +/- {}"
                    .format(V0, V0_err))
         self._vmsg("_calc_base_variance_integral: V0[xval] = {}"
                    .format(V0 * (self._xsig * self.Zu)**2))
 
+    def Vtot(self):
+        """
+        Calculates the variance of the n-point Bayesian quadrature scheme:
+            Vn = V0 - z.T * inv(K) * z
+        where V0 is the base variance (see above), K is the covariance matrix
+        the training points, and z is the integral of the covariance kernel
+        against the base measure (in our case, the filter transmission).
+        Assumes the covariance K and weights z have already been calculated.
+        As a side effect, updates the cached Cholesky factor of K.
+        """
+        self.Kchol = linalg.cholesky(self.K, lower=True)
+        zeta = linalg.solve_triangular(self.Kchol, self.zu, lower=True)
+        return self.V0 - np.dot(zeta, zeta)
+
+    def Vtot_n(self, u_n):
+        """
+        In the context of the greedy optimization of a Bayesian quadrature
+        scheme, this function wraps self.Vtot() and makes it a function of
+        the location of the last point added (the one being optimized over).
+        As a side effect, updates the internal state of the class instance,
+        including u, zu, K, and its Cholesky factor Kchol.
+        """
+        z_n = integrate.quad(self._kuup, self._ulo, self._uhi, args=(u_n))[0]
+        self.u[-1], self.zu[-1] = u_n, z_n
+        self.K[-1,:] = self.K[:,-1] = self._kuu(self.u, u_n)
+        self.Vn = self.Vtot()
+        return self.Vn
+
+    def Vtot_all(self, uvec):
+        """
+        In the context of brute-force optimization of a Bayesian quadrature
+        scheme, this function wraps self.Vtot() and makes it a function of
+        the location of all quadrature points, as a vector to optimize.
+        As a side effect, updates the internal state of the class instance,
+        including u, zu, K, and its Cholesky factor Kchol.
+        """
+        self.u, self.zu = np.array(uvec), np.zeros(len(uvec))
+        for i, ui in enumerate(uvec):
+            self.zu[i] = integrate.quad(
+                    self._kuup, self._ulo, self._uhi, args=(ui))[0]
+        self.K = self._kuu(self.u[:,np.newaxis], self.u[np.newaxis,:])
+        self.K += 1e-12*np.eye(len(self.u))
+        self.Vn = self.Vtot()
+        uvec_str = ("{:.3f} " * len(uvec)).format(*uvec)
+        self._vmsg("*** u_var:  uvec = [{}], Vn = {}".format(uvec_str, self.Vn))
+        return self.Vn
+
     def add_one_point(self):
         """
         Runs optimization for adding a single point to the BQ filter.
         """
-        Ktmp = np.array(self.K)
-        def u_var(u_n):
-            # Wrapper functions for integrands
-            integ_u = lambda u: self.kuu(u, u_n) * self.pu(u)
-            _zn = integrate.quad(integ_u, self._ulo, self._uhi)[0]
-            # Update internal state
-            self.u[-1] = u_n
-            self.zu[-1] = _zn
-            kuu_n = self.kuu(self.u, u_n)
-            Ktmp[-1,:] = Ktmp[:,-1] = kuu_n
-            # Calculate and return variance = V0 - z.T * inv(K) * z
-            self.Kchol = linalg.cholesky(Ktmp, lower=True)
-            zeta = linalg.solve_triangular(self.Kchol, self.zu, lower=True)
-            self.Vn = self.V0 - np.dot(zeta, zeta)
-            return self.Vn
         # Enlarge internal state and optimize over location of new point
         # Since doing this in u, initial guess for new point is 0.0
-        n = len(self.u)
-        KX = np.atleast_2d([self.u])
         self.u = np.concatenate([self.u, [0.0]])
         self.zu = np.concatenate([self.zu, [0.0]])
-        if Ktmp.shape[1] == 0:
-            Ktmp = np.array([[1.0]])
-        else:
-            Ktmp = np.vstack([np.hstack([self.K, KX.T   ]),
-                              np.hstack([KX,     [[1.0]]])])
-        Ktmp += 1e-8 * np.eye(n+1)
-        # As we add more points the Cholesky factor may become more unstable,
-        # so add a small nugget -- as small as we can get away with.
-        nugget = 1e-07
-        self._vmsg("add_one_point:  Optimizing over point #{}...".format(n+1))
-        while nugget <= 0.1:
-            # try:
-                u0 = np.array([0.0])
-                bounds = np.array([(self._ulo, self._uhi)])
-                cons = [{ 'type': 'ineq', 'fun': lambda u: u - self._ulo },
-                        { 'type': 'ineq', 'fun': lambda u: self._uhi - u }]
-                result = optimize.minimize(
-                        u_var, u0, method='COBYLA', constraints=cons)
-                break
-            # except Exception as e:
-                self._vmsg("add_one_point:  Cholesky factorization failed")
-                self._vmsg(str(e))
-                self._vmsg("add_one_point:  adding nugget = {} "
-                           "to stabilize Cholesky factor".format(nugget))
-                Ktmp += nugget * np.eye(n+1)
-                nugget *= 10
-        if nugget > 0.1:
-            self._vmsg("add_one_point:  total Cholesky factorization fail")
-            self.u, self.zu = self.u[:-1], self.zu[:-1]
-            return
-        elif result.success:
-            self._vmsg("add_one_point:  Added new point (wt) {} ({}); Vn = {}"
-                       .format(self.u[-1], self.zu[-1], self.Vn))
-            self.K = Ktmp
-        else:
+        n = len(self.u)
+        Ktmp = np.eye(n)
+        Ktmp[:-1,:-1] = self.K
+        self.K = Ktmp
+        # Use COBYLA for minimization; it seems to work well
+        self._vmsg("add_one_point:  Optimizing over point #{}...".format(n))
+        try:
+            cons = [{ 'type': 'ineq', 'fun': lambda u: u - self._ulo },
+                    { 'type': 'ineq', 'fun': lambda u: self._uhi - u }]
+            result = optimize.minimize(
+                    self.Vtot_n, [0.0], method='COBYLA', constraints=cons)
+            cobyla_except = False
+        except Exception as e:
+            self._vmsg("add_one_point:  exception caught during optimization")
+            self._vmsg(str(e))
+            cobyla_except = True
+        if cobyla_except or not result.success:
+            # If we died, back out the changes to the internal state and bail
             self._vmsg("add_one_point:  Optimization failed, don't trust me!")
-            self._vmsg("Failure message:  {}".format(result.message))
-        self.wbq = linalg.cho_solve((self.Kchol, True), self.zu)
-        # Return quadrature points and weights for integration transformed
-        # back to original x-axis, along with the renormalized variance.
-        self.x = self._u2x(self.u)
-        self.zx = self.zu * self._xsig * self.Zu
-        self.Vxn = self.Vn * (self._xsig * self.Zu)**2
+            if not cobyla_except:
+                self._vmsg("optimize.minimize fail message: " + result.message)
+            self.u, self.zu = self.u[:-1], self.zu[:-1]
+            self.K = self.K[:-1,:-1]
+        else:
+            # Calculate quadrature weights and transform them back to the
+            # original x-axis as a convenience for the user.
+            self._vmsg("add_one_point:  Added new point (zu) {} ({}); Vn = {}"
+                       .format(self.u[-1], self.zu[-1], self.Vn))
+            self.wbq = linalg.cho_solve((self.Kchol, True), self.zu)
+            self.x = self._u2x(self.u)
+            self.zx = self.zu * self._xsig * self.Zu
 
     def add_n_points(self, n=0):
         """
         What it says on the tin:  runs self.add_one_point() n times.
+        This is the recommended method for most base measures.
         """
         for i in range(n):
             self.add_one_point()
 
     def solve_n_points(self, n=0):
         """
-        Runs ab initio optimization for an n-point Bayesian quadrature.
+        Runs ab initio optimization for an n-point Bayesian quadrature,
+        treating all quadrature point locations as a vector to optimize over.
+        NB:  this takes a LONG time to run and is not obviously better on a
+        practical basis than the greedy algorithm BQFilter.add_n_points(),
+        so we strongly recommend the former.
         """
-        print "self._ulo, self._uhi =", self._ulo, self._uhi
-        def u_var(uvec):
-            self.u = np.array(uvec)
-            self.zu = np.zeros(len(uvec))
-            for i, ui in enumerate(uvec):
-                integ_u = lambda u: self.kuu(u, ui) * self.pu(u)
-                self.zu[i] = integrate.quad(integ_u, self._ulo, self._uhi)[0]
-            Ktmp = self.kuu(self.u[:,np.newaxis], self.u[np.newaxis,:])
-            Ktmp += 1e-12*np.eye(len(self.u))
-            # Calculate and return variance = V0 - z.T * inv(K) * z
-            self.Kchol = linalg.cholesky(Ktmp, lower=True)
-            zeta = linalg.solve_triangular(self.Kchol, self.zu, lower=True)
-            self.Vn = self.V0 - np.dot(zeta, zeta)
-            self._vmsg("*** u_var:  uvec =" +
-                       ("{:.3f} " * len(uvec)).format(*uvec) +
-                       "Vn = {}".format(self.Vn))
-            return self.Vn
-        # Optimize all the points
+        # Set up an initial guess with points spread out across the support
+        # of the base measure, and constraints to stay in that support.
         u0 = np.linspace(self._ulo, self._uhi, n+2)[1:-1]
-        bounds = np.array([(self._ulo, self._uhi)])
         cons =  [{ 'type': 'ineq', 'fun': lambda u: u[i] - self._ulo }
                  for i in range(n)]
         cons += [{ 'type': 'ineq', 'fun': lambda u: self._uhi - u[i] }
                  for i in range(n)]
-        result = optimize.minimize(
-                u_var, u0, method='COBYLA', constraints=cons)
-        self.wbq = linalg.cho_solve((self.Kchol, True), self.zu)
-        # Return quadrature points and weights for integration transformed
-        # back to original x-axis, along with the renormalized variance.
-        self.x = self._u2x(self.u)
-        self.zx = self.zu * self._xsig * self.Zu
-        self.Vxn = self.Vn * (self._xsig * self.Zu)**2
+        try:
+            result = optimize.minimize(
+                    self.Vtot_all, u0, method='COBYLA', constraints=cons)
+            cobyla_except = False
+        except Exception as e:
+            self._vmsg("solve_n_points:  minimization failed")
+            self._vmsg(str(e))
+            epic_fail = True
+        if cobyla_except or not result.success:
+            # If we died, report that and bail
+            self._vmsg("solve_n_points:  Optimization failed, don't trust me!")
+            self._vmsg("optimize.minimize failure message: " + result.message)
+        else:
+            # Calculate quadrature weights and transform them back to the
+            # original x-axis as a convenience for the user.
+            self._vmsg("solve_n_points:  Found {} points w/ Vn = {}"
+                       .format(len(self.u), self.Vn))
+            self._vmsg("quadrature points = {}".format(self.u))
+            self.wbq = linalg.cho_solve((self.Kchol, True), self.zu)
+            self.x = self._u2x(self.u)
+            self.zx = self.zu * self._xsig * self.Zu
 
     def int_quadz(self, f):
         """
