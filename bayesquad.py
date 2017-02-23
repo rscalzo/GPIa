@@ -119,10 +119,10 @@ class BQFilter(object):
         def u_var(u_n):
             # Wrapper functions for integrands
             integ_u = lambda u: self.kuu(u, u_n) * self.pu(u)
-            _zn = lambda u: integrate.quad(integ_u, self._ulo, self._uhi)[0]
+            _zn = integrate.quad(integ_u, self._ulo, self._uhi)[0]
             # Update internal state
             self.u[-1] = u_n
-            self.zu[-1] = _zn(u_n)
+            self.zu[-1] = _zn
             kuu_n = self.kuu(self.u, u_n)
             Ktmp[-1,:] = Ktmp[:,-1] = kuu_n
             # Calculate and return variance = V0 - z.T * inv(K) * z
@@ -186,6 +186,43 @@ class BQFilter(object):
         """
         for i in range(n):
             self.add_one_point()
+
+    def solve_n_points(self, n=0):
+        """
+        Runs ab initio optimization for an n-point Bayesian quadrature.
+        """
+        print "self._ulo, self._uhi =", self._ulo, self._uhi
+        def u_var(uvec):
+            self.u = np.array(uvec)
+            self.zu = np.zeros(len(uvec))
+            for i, ui in enumerate(uvec):
+                integ_u = lambda u: self.kuu(u, ui) * self.pu(u)
+                self.zu[i] = integrate.quad(integ_u, self._ulo, self._uhi)[0]
+            Ktmp = self.kuu(self.u[:,np.newaxis], self.u[np.newaxis,:])
+            Ktmp += 1e-12*np.eye(len(self.u))
+            # Calculate and return variance = V0 - z.T * inv(K) * z
+            self.Kchol = linalg.cholesky(Ktmp, lower=True)
+            zeta = linalg.solve_triangular(self.Kchol, self.zu, lower=True)
+            self.Vn = self.V0 - np.dot(zeta, zeta)
+            self._vmsg("*** u_var:  uvec =" +
+                       ("{:.3f} " * len(uvec)).format(*uvec) +
+                       "Vn = {}".format(self.Vn))
+            return self.Vn
+        # Optimize all the points
+        u0 = np.linspace(self._ulo, self._uhi, n+2)[1:-1]
+        bounds = np.array([(self._ulo, self._uhi)])
+        cons =  [{ 'type': 'ineq', 'fun': lambda u: u[i] - self._ulo }
+                 for i in range(n)]
+        cons += [{ 'type': 'ineq', 'fun': lambda u: self._uhi - u[i] }
+                 for i in range(n)]
+        result = optimize.minimize(
+                u_var, u0, method='COBYLA', constraints=cons)
+        self.wbq = linalg.cho_solve((self.Kchol, True), self.zu)
+        # Return quadrature points and weights for integration transformed
+        # back to original x-axis, along with the renormalized variance.
+        self.x = self._u2x(self.u)
+        self.zx = self.zu * self._xsig * self.Zu
+        self.Vxn = self.Vn * (self._xsig * self.Zu)**2
 
     def int_quadz(self, f):
         """
