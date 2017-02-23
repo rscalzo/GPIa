@@ -92,4 +92,9 @@ can be compressed via Bayesian quadrature to make this more tractable
 (O'Hagan 1991; [Huszar & Duvenaud 2012](https://arxiv.org/abs/1204.1664)).
 Eventually the GP parameters themselves will admit additional hyperpriors
 (such as a graphical model) to extract a compressed representation of the
-full spectrophotometric time series.
+full spectrophotometric time series.  The main parameter will correspond to
+the light curve decline rate, as noted extensively in the SN Ia literature
+(e.g. (Phillips 1993)[http://adsabs.harvard.edu/abs/1993ApJ...413L.105P],
+(Nugent et al. 1995)[http://adsabs.harvard.edu/abs/1995ApJ...455L.147N]),
+but further parameters are likely to be of greater interest physically,
+and could result in improved luminosity distances overall.
