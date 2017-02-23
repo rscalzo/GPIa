@@ -104,8 +104,6 @@ class BQFilter(object):
             V0 = int_dx int_dx' k(x,x') * p(x) * p(x')
         that forms the baseline variance estimate for a BQ filter.
         """
-        self.V0 = 0.154145394591
-        return
         # Run dblquad -- this should take about 1 min to complete
         self._vmsg("_calc_base_variance_integral:  Calculating...")
         V0, V0_err = integrate.dblquad(self._kuupp, self._ulo, self._uhi,
@@ -278,13 +276,22 @@ class BQFilter(object):
 
 def sqexp(x1, x2, l):
     """
-    Kernel for the GP, in this case an isotropic square exponential
+    GP kernel, in this case an isotropic square exponential.
+    Parameters:
+        x1, x2:  floats or compatible np.ndarrays
+        l:       variation scale(s); units, shape compatible with x1 & x2
     """
     return np.exp(-0.5*((x1-x2)/l)**2)
 
 def sqlogexp(x1, x2, logl):
     """
-    GP kernel, square exponential in log of variable
+    GP kernel, square exponential in log of variable.  This is useful in
+    the case where the function being integrated is a SN Ia spectrum,
+    since its variations have a characteristic velocity scale dv = dl/l
+    rather than a wavelength scale dl.
+    Parameters:
+        x1, x2:  strictly *positive* floats or compatible np.ndarrays
+        logl:    variation scale(s); units, shape compatible with x1 & x2
     """
     return np.exp(-0.5*((np.log(x1)-np.log(x2))/logl)**2)
 
