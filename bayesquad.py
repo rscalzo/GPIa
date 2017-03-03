@@ -197,7 +197,8 @@ class BQFilter(object):
             # original x-axis as a convenience for the user.
             self._vmsg("add_one_point:  Added new point (zu) {} ({}); Vn = {}"
                        .format(self.u[-1], self.zu[-1], self.Vn))
-            self.wbq = linalg.cho_solve((self.Kchol, True), self.zu)
+            self.wbq_u = linalg.cho_solve((self.Kchol, True), self.zu)
+            self.wbq_x = self.wbq_u * self._xsig * self.Zu
             self.x = self._u2x(self.u)
             self.zx = self.zu * self._xsig * self.Zu
 
@@ -242,7 +243,8 @@ class BQFilter(object):
             self._vmsg("solve_n_points:  Found {} points w/ Vn = {}"
                        .format(len(self.u), self.Vn))
             self._vmsg("quadrature points = {}".format(self.u))
-            self.wbq = linalg.cho_solve((self.Kchol, True), self.zu)
+            self.wbq_u = linalg.cho_solve((self.Kchol, True), self.zu)
+            self.wbq_x = self.wbq_u * self._xsig * self.Zu
             self.x = self._u2x(self.u)
             self.zx = self.zu * self._xsig * self.Zu
 
@@ -269,8 +271,7 @@ class BQFilter(object):
         Parameters:
             f: 1-D callable
         """
-        pnorm = self._xsig * self.Zu
-        Fx = np.dot(self.wbq, f(self.x)) * pnorm
+        Fx = np.dot(self.wbq_x, f(self.x))
         self._vmsg('int_bayes: F = {}'.format(Fx))
         return Fx
 
